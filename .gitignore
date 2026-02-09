@@ -24,8 +24,11 @@ ENV/
 # Pytest
 .pytest_cache/
 
-# Data (too large for git)
-data/
+# Data (raw files too large for git)
+data/raw_*/
+data/**/*.pkl
+data/**/*.zip
+data/**/*.data
 checkpoints/
 checkpoints_*/
 logs/
