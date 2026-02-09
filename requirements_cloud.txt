@@ -1,0 +1,16 @@
+torch
+torchvision
+torchaudio
+accelerate
+mamba-ssm
+causal-conv1d
+bitsandbytes
+wandb
+numpy
+pandas
+tqdm
+vectorbt
+scikit-learn
+matplotlib
+plotly
+ipykernel

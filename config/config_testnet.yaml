@@ -1,0 +1,51 @@
+binance:
+  testnet: true
+
+market:
+  symbol: XRPUSDC
+  tick_size: 0.0001
+  min_qty: 0.1
+  min_notional: 5.0
+  max_position: 1000
+  update_interval: 0.1
+  maker_fee: 0.001
+  taker_fee: 0.00095
+
+rl:
+  zeta: 0.005
+  gamma: 0.995
+  max_bias: 0.001
+  max_spread: 0.002
+  min_spread: 0.001
+  max_equity_exposure: 0.50
+  initial_cash: 100.0
+  max_steps: 1000
+
+model:
+  input_shape: [50, 40]
+  window_size: 50
+  embedding_dim: 192
+  num_heads: 4
+  num_layers: 3
+  dropout: 0.1
+  n_features: 40
+
+deployment:
+  mode: futures  # 'futures', 'spot', or 'margin'
+  checkpoint_path: checkpoints/best_model.pt
+  log_dir: logs/testnet
+  max_loss_usd: -50.0
+  max_position_value_usd: 500.0
+  order_refresh_interval: 1.0
+  reconnect_delay: 5.0
+  log_frequency: 10
+  stale_data_timeout: 5.0
+
+finetune:
+  learning_rate: 0.00001       # 10x lower than training to avoid catastrophic forgetting
+  update_every_n_steps: 256    # PPO update frequency
+  save_every_n_episodes: 5     # Checkpoint frequency
+  checkpoint_dir: checkpoints/finetune
+  shaping_proximity: 0.00005   # Quote competitiveness vs BBO
+  shaping_presence: 0.00002    # Reward for quoting both sides
+  shaping_spread: 0.00003      # Reward for tight spread

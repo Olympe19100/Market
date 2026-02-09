@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+.venv_stable/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Pytest
+.pytest_cache/
+
+# Data (too large for git)
+data/
+checkpoints/
+checkpoints_*/
+logs/
+runs/
+tensorboard/
+
+# Secrets
+.env
+*.json
+!config/*.json
+!viable_pairs_bybit.json
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Temp files
+*.tmp
+*.log
+*.bak
