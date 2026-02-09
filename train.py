@@ -26,6 +26,10 @@ def set_seed(seed: int = 42):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        # Enable TF32 for faster matmul on Ampere+ GPUs (A100, H100, RTX 30xx/40xx)
+        torch.set_float32_matmul_precision('high')
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
