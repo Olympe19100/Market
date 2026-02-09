@@ -73,7 +73,7 @@ class MarketDataLoader:
 
     # LRU memory cache shared across instances
     _lru_cache: OrderedDict = OrderedDict()
-    _lru_max_size: int = 3
+    _lru_max_size: int = 10  # Increased for many parallel envs
 
     def __init__(self, data_path: str, split: Optional[str] = None):
         """
@@ -81,7 +81,7 @@ class MarketDataLoader:
             data_path: Path to data directory or single file.
             split: 'train', 'eval', or None (all data). Chronological split.
         """
-        logger.info(f"Initialisation du DataLoader avec: {data_path}, split={split}")
+        logger.debug(f"Initialisation du DataLoader avec: {data_path}, split={split}")
 
         self._lazy_mode = False
         self._file_paths: List[str] = []

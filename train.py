@@ -220,6 +220,17 @@ async def train(config: Dict, train_data_path: str, checkpoint_dir: str = "check
         # Create vectorized train environments for parallel data collection
         n_envs = config['training'].get('n_envs', 8)
 
+        # Pre-warm data cache before creating environments (avoids 128x redundant loads)
+        logger.info(f"Pre-warming data cache for {n_envs} environments...")
+        from training.data_loader import MarketDataLoader
+        _warmup_loader = MarketDataLoader(train_data_path, split='train')
+        # Load a few files into LRU cache
+        for i, fp in enumerate(_warmup_loader._file_paths[:min(3, len(_warmup_loader._file_paths))]):
+            _warmup_loader._load_file_cached(fp)
+            logger.info(f"  Cached file {i+1}: {os.path.basename(fp)}")
+        del _warmup_loader
+        logger.info("Data cache ready")
+
         def make_train_env():
             return SimulationMarketMakerEnv(
                 rl_config=rl_config,

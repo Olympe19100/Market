@@ -78,7 +78,7 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
         # Mark-to-market: previous mid price for dense unrealized PnL signal
         self._prev_mid_price = 0.0
 
-        logger.info(f"SimulationMarketMakerEnv initialized with initial_cash={initial_cash}")
+        logger.debug(f"SimulationMarketMakerEnv initialized with initial_cash={initial_cash}")
 
     def set_risk_aversion(self, gamma: float):
         """Sync risk aversion γ from PPOAgent (learned via Lagrangian).
