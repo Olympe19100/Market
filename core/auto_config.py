@@ -499,14 +499,19 @@ def create_training_config(data_path: str,
     # Round to power of 2 for GPU efficiency
     batch_size = 2 ** int(np.log2(batch_size))
 
-    # Learning rate derived from batch size (linear scaling rule, Goyal 2017)
-    # Base: batch=256, lr=3e-4
-    # For batch=512: lr = 3e-4 * sqrt(512/256) = 4.2e-4
-    # But we use conservative scaling for RL stability
+    # Learning rate scaling for RL (inverse of supervised learning!)
+    # In PPO, more envs = bigger buffer = larger policy change per update
+    # To keep KL stable, we must DECREASE LR with more envs
+    #
+    # Formula: LR = base_lr / sqrt(n_envs / base_n_envs)
+    # Base: n_envs=16, lr=3e-4
+    # For n_envs=64:  lr = 3e-4 / sqrt(64/16) = 3e-4 / 2 = 1.5e-4
+    # For n_envs=128: lr = 3e-4 / sqrt(128/16) = 3e-4 / 2.83 = 1.06e-4
+    #
+    # This ensures KL divergence stays approximately constant regardless of n_envs
     base_lr = 3e-4
-    base_batch = 256
-    learning_rate = base_lr * np.sqrt(batch_size / base_batch) * 0.5  # 0.5x for safety
-    learning_rate = max(1e-5, min(1e-3, learning_rate))  # Clamp to [1e-5, 1e-3]
+    base_n_envs = 16
+    learning_rate = base_lr / np.sqrt(n_envs / base_n_envs)
 
     # Num epochs derived from sample efficiency target
     # Each sample should be seen ~3x on average (Schulman 2017)
@@ -605,7 +610,7 @@ def create_training_config(data_path: str,
             'total_snapshots': total_snapshots,
             'buffer_size_formula': f'{n_envs} * {max_steps} = {buffer_size}',
             'batch_size_formula': f'2^floor(log2({buffer_size}/{target_gradient_steps})) = {batch_size}',
-            'learning_rate_formula': f'{base_lr} * sqrt({batch_size}/{base_batch}) * 0.5 = {learning_rate:.2e}',
+            'learning_rate_formula': f'{base_lr} / sqrt({n_envs}/{base_n_envs}) = {learning_rate:.2e}',
             'num_epochs_formula': f'ceil(3 / {n_batches} * {target_gradient_steps}) = {num_epochs}',
             'warmup_formula': f'sqrt({n_episodes}) = {warmup_episodes}',
             'target_kl_formula': f'0.5 * {action_dim} * {delta_per_dim}^2 = {target_kl:.4f}',
