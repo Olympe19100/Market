@@ -29,12 +29,19 @@ class AsyncVectorEnv:
             n_envs: number of parallel environments
         """
         self.n_envs = n_envs
+
+        # Auto-detect optimal number of workers based on CPU cores
+        import multiprocessing
+        cpu_cores = multiprocessing.cpu_count()
+        # Use up to half the cores, capped at n_envs and max 32
+        n_workers = min(n_envs, max(4, cpu_cores // 2), 32)
+
+        logger.info(f"Creating {n_envs} environments with {n_workers} workers (CPU: {cpu_cores} cores)...")
+
         # Parallel environment creation using ThreadPoolExecutor
-        # This speeds up creation of many environments (e.g., 128) significantly
-        n_workers = min(n_envs, 16)  # Cap workers to avoid overhead
-        logger.info(f"Creating {n_envs} environments with {n_workers} parallel workers...")
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             self.envs = list(executor.map(lambda _: env_fn(), range(n_envs)))
+
         logger.info(f"AsyncVectorEnv initialized with {n_envs} environments")
 
     async def reset(self) -> List[Dict]:

@@ -19,8 +19,70 @@ import logging
 import numpy as np
 from typing import Dict, Tuple, Optional
 from decimal import Decimal
+import multiprocessing
 
 logger = logging.getLogger(__name__)
+
+
+def get_optimal_parallelism() -> Dict:
+    """Détecte les ressources système et retourne les paramètres optimaux.
+
+    Returns:
+        Dict avec:
+        - n_envs: nombre optimal d'environnements parallèles
+        - n_workers: nombre optimal de workers pour création envs
+        - batch_size: taille de batch optimale pour GPU
+        - gpu_name: nom du GPU détecté
+        - gpu_memory_gb: mémoire GPU en GB
+        - cpu_cores: nombre de cores CPU
+    """
+    result = {
+        'n_envs': 8,
+        'n_workers': 4,
+        'batch_size': 512,
+        'gpu_name': 'CPU',
+        'gpu_memory_gb': 0,
+        'cpu_cores': multiprocessing.cpu_count()
+    }
+
+    # CPU cores for parallel env creation
+    cpu_cores = result['cpu_cores']
+    # Use half the cores to avoid overwhelming the system
+    result['n_workers'] = max(4, min(cpu_cores // 2, 32))
+
+    # GPU detection
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            gpu_memory_gb = props.total_memory / (1024**3)
+            result['gpu_name'] = props.name
+            result['gpu_memory_gb'] = gpu_memory_gb
+
+            # Scale n_envs based on GPU memory
+            if gpu_memory_gb >= 70:
+                result['n_envs'] = 128
+                result['batch_size'] = 4096
+            elif gpu_memory_gb >= 35:
+                result['n_envs'] = 64
+                result['batch_size'] = 2048
+            elif gpu_memory_gb >= 20:
+                result['n_envs'] = 32
+                result['batch_size'] = 1024
+            elif gpu_memory_gb >= 10:
+                result['n_envs'] = 16
+                result['batch_size'] = 512
+            else:
+                result['n_envs'] = 8
+                result['batch_size'] = 256
+
+            logger.info(f"GPU: {result['gpu_name']} ({gpu_memory_gb:.1f}GB)")
+            logger.info(f"CPU: {cpu_cores} cores → {result['n_workers']} workers")
+            logger.info(f"Optimal: n_envs={result['n_envs']}, batch={result['batch_size']}")
+    except Exception as e:
+        logger.warning(f"GPU detection failed: {e}")
+
+    return result
 
 
 def get_precision(value_str: str) -> int:
