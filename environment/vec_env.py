@@ -5,6 +5,7 @@
 import asyncio
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,12 @@ class AsyncVectorEnv:
             n_envs: number of parallel environments
         """
         self.n_envs = n_envs
-        self.envs = [env_fn() for _ in range(n_envs)]
+        # Parallel environment creation using ThreadPoolExecutor
+        # This speeds up creation of many environments (e.g., 128) significantly
+        n_workers = min(n_envs, 16)  # Cap workers to avoid overhead
+        logger.info(f"Creating {n_envs} environments with {n_workers} parallel workers...")
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            self.envs = list(executor.map(lambda _: env_fn(), range(n_envs)))
         logger.info(f"AsyncVectorEnv initialized with {n_envs} environments")
 
     async def reset(self) -> List[Dict]:
