@@ -221,15 +221,18 @@ async def train(config: Dict, train_data_path: str, checkpoint_dir: str = "check
         n_envs = config['training'].get('n_envs', 8)
 
         # Pre-warm data cache before creating environments (avoids 128x redundant loads)
-        logger.info(f"Pre-warming data cache for {n_envs} environments...")
         from training.data_loader import MarketDataLoader
         _warmup_loader = MarketDataLoader(train_data_path, split='train')
-        # Load a few files into LRU cache
-        for i, fp in enumerate(_warmup_loader._file_paths[:min(3, len(_warmup_loader._file_paths))]):
+        n_files = len(_warmup_loader._file_paths)
+        logger.info(f"Pre-warming data cache: {n_files} files for {n_envs} environments...")
+        # Load ALL files into LRU cache (essential for 128 envs picking random files)
+        for i, fp in enumerate(_warmup_loader._file_paths):
             _warmup_loader._load_file_cached(fp)
-            logger.info(f"  Cached file {i+1}: {os.path.basename(fp)}")
+            logger.info(f"  Cached [{i+1}/{n_files}]: {os.path.basename(fp)}")
+        # Increase LRU size to hold all files
+        MarketDataLoader._lru_max_size = max(MarketDataLoader._lru_max_size, n_files + 2)
         del _warmup_loader
-        logger.info("Data cache ready")
+        logger.info(f"Data cache ready ({n_files} files in memory)")
 
         def make_train_env():
             return SimulationMarketMakerEnv(

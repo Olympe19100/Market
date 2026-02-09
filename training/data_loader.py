@@ -296,16 +296,16 @@ class MarketDataLoader:
             if new_file != self._current_file:
                 self.data = self._load_file_cached(new_file)
                 self._current_file = new_file
-                logger.info(f"Fichier chargé: {os.path.basename(new_file)} ({len(self.data)} orderbooks)")
+                logger.debug(f"Fichier chargé: {os.path.basename(new_file)} ({len(self.data)} orderbooks)")
 
         # Position aléatoire dans le fichier courant
         if random_offset and len(self.data) > episode_length:
             max_start = len(self.data) - episode_length
             self.current_idx = np.random.randint(0, max_start)
-            logger.info(f"Data loader reset à offset {self.current_idx}/{len(self.data)}")
+            logger.debug(f"Data loader reset à offset {self.current_idx}/{len(self.data)}")
         else:
             self.current_idx = 0
-            logger.info("Reset du data loader")
+            logger.debug("Reset du data loader")
 
     @property
     def n_files(self) -> int:
