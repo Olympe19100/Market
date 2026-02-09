@@ -10,7 +10,7 @@ from data.processor import LOBFeatureProcessor, MarketFeatureProcessor
 import logging
 from training.data_loader import MarketDataLoader
 import pandas as pd
-import vectorbt as vbt
+# vectorbt imported lazily when needed (heavy import ~2s)
 
 # Configuration du logger pour le suivi de l'environnement de simulation
 logger = logging.getLogger(__name__)
@@ -285,7 +285,8 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
             self.current_state.best_ask = asks[0][0]
             self.current_state.current_spread = asks[0][0] - bids[0][0]
 
-            # Créer le portfolio vectorbt initial
+            # Créer le portfolio vectorbt initial (lazy import)
+            import vectorbt as vbt
             self.portfolio = vbt.Portfolio.from_holding(
                 close=pd.Series([self.current_state.mid_price]),
                 init_cash=initial_cash,

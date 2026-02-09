@@ -2,14 +2,17 @@ import traceback
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass, field
 import torch
 from core.config import RLConfig, MarketConfig
 from data.processor import LOBFeatureProcessor, MarketFeatureProcessor
 from training import data_loader
-import vectorbt as vbt
+
+# Lazy import vectorbt (heavy ~2s import)
+if TYPE_CHECKING:
+    import vectorbt as vbt
 
 # Configuration du logger pour suivre l'environnement du market maker
 logger = logging.getLogger('market_maker.environment')
@@ -22,7 +25,7 @@ class MarketMakerState:
     lob_features: Optional[np.ndarray] = None
     market_features: Optional[np.ndarray] = None
     time_remaining: float = 1.0
-    portfolio: Optional[vbt.Portfolio] = None
+    portfolio: Optional[Any] = None  # vbt.Portfolio (lazy imported)
     trades_df: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=[
         'timestamp', 'price', 'size', 'side', 'entry_price', 'exit_price', 'pnl', 'fees']))
     inventory: float = 0.0
