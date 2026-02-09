@@ -1619,7 +1619,8 @@ class PPOAgent:
 
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action = dist.sample()
-            log_prob = dist.log_prob(action).sum(dim=-1)
+            # Clamp log_prob to prevent numerical instability [-20, 2] ≈ [2e-9, 7.4]
+            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=-20.0, max=2.0)
 
             # Store sequence for memory
             state['lob_seq'] = lob_seq
@@ -1742,7 +1743,8 @@ class PPOAgent:
             # Sample actions
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action_t = dist.sample()
-            log_prob_t = dist.log_prob(action_t).sum(dim=-1)
+            # Clamp log_prob to prevent numerical instability
+            log_prob_t = torch.clamp(dist.log_prob(action_t).sum(dim=-1), min=-20.0, max=2.0)
 
             # Convert to numpy and distribute to output lists
             action_np = action_t.cpu().numpy()
@@ -1959,7 +1961,8 @@ class PPOAgent:
 
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action = dist.sample()
-            log_prob = dist.log_prob(action).sum(dim=-1)
+            # Clamp log_prob to prevent numerical instability [-20, 2] ≈ [2e-9, 7.4]
+            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=-20.0, max=2.0)
 
             # Store sequence for memory
             state['lob_seq'] = lob_seq
@@ -2152,9 +2155,18 @@ class PPOAgent:
             
             advantages = torch.tensor(advantages, dtype=torch.float32, device=self.device)
             advantages = advantages.squeeze(-1)  # Fix: ensure shape is (N,) not (N, 1)
-            values_t = torch.tensor(values, dtype=torch.float32, device=self.device).squeeze(-1)  # Must match advantages shape
-            returns = advantages + values_t  # Both (N,) now
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            values_t = torch.tensor(values, dtype=torch.float32, device=self.device).squeeze(-1)
+
+            # CRITICAL: Normalize advantages BEFORE computing returns
+            # This ensures returns = V(s) + A_normalized(s) relationship holds
+            adv_std = advantages.std()
+            if adv_std < 1e-6:
+                # If all advantages identical (flat rewards), use identity scaling
+                adv_std = torch.tensor(1.0, device=self.device)
+            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+
+            # Compute returns from normalized advantages
+            returns = advantages + values_t
             
             kl_early_stop = False
             # Get adaptive KL parameters from controller
@@ -2244,12 +2256,14 @@ class PPOAgent:
                         continue
 
                     dist = torch.distributions.Normal(action_mean, torch.exp(action_logstd))
-                    new_log_probs = dist.log_prob(batch['actions']).sum(-1)
+                    # Clamp log_probs for numerical stability
+                    new_log_probs = torch.clamp(dist.log_prob(batch['actions']).sum(-1), min=-20.0, max=2.0)
                     # Total entropy = sum over action dimensions, then mean over batch
                     # For 9D Gaussian with σ=0.6: H ≈ 9 × 0.9 = 8.1
                     entropy = dist.entropy().sum(-1).mean()
 
-                    ratio = torch.exp(new_log_probs - batch['log_probs'])
+                    # Clamp ratio to prevent extreme updates (extra safety)
+                    ratio = torch.clamp(torch.exp(new_log_probs - batch['log_probs']), min=0.01, max=100.0)
 
                     # Update adaptive clip ratio based on ratio statistics (Engstrom 2020)
                     self.current_clip_ratio = self.adaptive_clip.update(ratio)
