@@ -24,10 +24,18 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
     - Annulations d'ordres
     - Rejet d'ordres
     """
+    # Shared processors cache (class-level) - avoids creating 128 copies
+    _shared_lob_processor = None
+    _shared_market_processor = None
+
     def __init__(self, rl_config: RLConfig, market_config: MarketConfig, sim_config: SimulationConfig, data_path: str, split: str = None):
-        # Initialisation des processors
-        lob_processor = LOBFeatureProcessor(market_config=market_config)
-        market_processor = MarketFeatureProcessor(market_config=market_config)
+        # Use shared processors (created once, reused by all envs)
+        if SimulationMarketMakerEnv._shared_lob_processor is None:
+            SimulationMarketMakerEnv._shared_lob_processor = LOBFeatureProcessor(market_config=market_config)
+            SimulationMarketMakerEnv._shared_market_processor = MarketFeatureProcessor(market_config=market_config)
+
+        lob_processor = SimulationMarketMakerEnv._shared_lob_processor
+        market_processor = SimulationMarketMakerEnv._shared_market_processor
 
         super().__init__(
             rl_config=rl_config,

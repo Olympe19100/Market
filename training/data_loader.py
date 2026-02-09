@@ -75,6 +75,10 @@ class MarketDataLoader:
     _lru_cache: OrderedDict = OrderedDict()
     _lru_max_size: int = 10  # Increased for many parallel envs
 
+    # Shared metadata cache (avoids 128x glob scans)
+    _file_paths_cache: Dict[str, List[str]] = {}
+    _cache_dir_cache: Dict[str, str] = {}
+
     def __init__(self, data_path: str, split: Optional[str] = None):
         """
         Args:
@@ -89,36 +93,46 @@ class MarketDataLoader:
         self._cache_dir: Optional[str] = None
 
         if os.path.isdir(data_path):
-            # Mode lazy: on ne charge PAS tout d'un coup
-            zip_files = sorted(glob.glob(os.path.join(data_path, '*_ob200.data.zip')))
-            data_files = sorted(glob.glob(os.path.join(data_path, '*_ob200.data')))
-            all_files = sorted(set(zip_files + data_files))
-            if not all_files:
-                raise FileNotFoundError(f"Aucun fichier *_ob200.data[.zip] trouvé dans {data_path}")
+            cache_key = f"{data_path}:{split}"
 
-            # Setup cache directory
-            self._cache_dir = os.path.join(data_path, 'cache')
-            os.makedirs(self._cache_dir, exist_ok=True)
-
-            # Chronological train/eval split
-            if split == 'train':
-                n_train = max(1, int(len(all_files) * 0.83))
-                self._file_paths = all_files[:n_train]
-                logger.info(f"Train split: {len(self._file_paths)}/{len(all_files)} fichiers")
-            elif split == 'eval':
-                n_train = max(1, int(len(all_files) * 0.83))
-                self._file_paths = all_files[n_train:]
-                if not self._file_paths:
-                    # Fallback: use last file
-                    self._file_paths = all_files[-1:]
-                logger.info(f"Eval split: {len(self._file_paths)}/{len(all_files)} fichiers")
+            # Use cached file list if available (avoids 128x glob scans)
+            if cache_key in MarketDataLoader._file_paths_cache:
+                self._file_paths = MarketDataLoader._file_paths_cache[cache_key]
+                self._cache_dir = MarketDataLoader._cache_dir_cache.get(data_path)
             else:
-                self._file_paths = all_files
+                # First time: scan directory and cache results
+                zip_files = sorted(glob.glob(os.path.join(data_path, '*_ob200.data.zip')))
+                data_files = sorted(glob.glob(os.path.join(data_path, '*_ob200.data')))
+                all_files = sorted(set(zip_files + data_files))
+                if not all_files:
+                    raise FileNotFoundError(f"Aucun fichier *_ob200.data[.zip] trouvé dans {data_path}")
+
+                # Setup cache directory (once)
+                self._cache_dir = os.path.join(data_path, 'cache')
+                os.makedirs(self._cache_dir, exist_ok=True)
+                MarketDataLoader._cache_dir_cache[data_path] = self._cache_dir
+
+                # Chronological train/eval split
+                if split == 'train':
+                    n_train = max(1, int(len(all_files) * 0.83))
+                    self._file_paths = all_files[:n_train]
+                    logger.info(f"Train split: {len(self._file_paths)}/{len(all_files)} fichiers")
+                elif split == 'eval':
+                    n_train = max(1, int(len(all_files) * 0.83))
+                    self._file_paths = all_files[n_train:]
+                    if not self._file_paths:
+                        self._file_paths = all_files[-1:]
+                    logger.info(f"Eval split: {len(self._file_paths)}/{len(all_files)} fichiers")
+                else:
+                    self._file_paths = all_files
+
+                # Cache for subsequent instances
+                MarketDataLoader._file_paths_cache[cache_key] = self._file_paths
+                logger.info(f"Mode lazy: {len(self._file_paths)} fichiers trouvés")
 
             self._lazy_mode = True
-            logger.info(f"Mode lazy: {len(self._file_paths)} fichiers trouvés")
 
-            # Charger le premier fichier pour initialiser
+            # Use already-cached data (fast - just reference from LRU)
             self.data = self._load_file_cached(self._file_paths[0])
             self._current_file = self._file_paths[0]
         elif data_path.endswith('.data.zip'):
@@ -128,13 +142,8 @@ class MarketDataLoader:
         else:
             self.data = self._load_json_data(data_path)
 
-        logger.info(f"Données chargées: {len(self.data)} échantillons")
+        logger.debug(f"Données chargées: {len(self.data)} échantillons")
         self.current_idx = 0
-
-        if self.data:
-            sample = self.data[0]
-            mid = (float(sample['bids'][0][0]) + float(sample['asks'][0][0])) / 2
-            logger.info(f"Premier échantillon - mid_price: {mid}, ts: {sample.get('local_timestamp', 'N/A')}")
 
     def _load_file(self, path: str) -> List[Dict]:
         """Charge un fichier (.data.zip ou .data) et retourne les orderbooks."""
