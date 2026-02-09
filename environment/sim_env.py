@@ -24,18 +24,19 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
     - Annulations d'ordres
     - Rejet d'ordres
     """
-    # Shared processors cache (class-level) - avoids creating 128 copies
+    # LOBFeatureProcessor is stateless → can be shared
+    # MarketFeatureProcessor has temporal state → MUST be per-env to avoid data leakage
     _shared_lob_processor = None
-    _shared_market_processor = None
 
     def __init__(self, rl_config: RLConfig, market_config: MarketConfig, sim_config: SimulationConfig, data_path: str, split: str = None):
-        # Use shared processors (created once, reused by all envs)
+        # LOBFeatureProcessor is stateless, safe to share
         if SimulationMarketMakerEnv._shared_lob_processor is None:
             SimulationMarketMakerEnv._shared_lob_processor = LOBFeatureProcessor(market_config=market_config)
-            SimulationMarketMakerEnv._shared_market_processor = MarketFeatureProcessor(market_config=market_config)
 
         lob_processor = SimulationMarketMakerEnv._shared_lob_processor
-        market_processor = SimulationMarketMakerEnv._shared_market_processor
+        # MarketFeatureProcessor has state (price_history, trade_history, RSI, etc.)
+        # MUST be per-env to prevent data leakage between parallel envs
+        market_processor = MarketFeatureProcessor(market_config=market_config)
 
         super().__init__(
             rl_config=rl_config,
@@ -669,8 +670,8 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
             #
             # ═══════════════════════════════════════════════════════════════
 
-            # Time remaining in episode [0, 1]
-            time_remaining = getattr(self.current_state, 'time_remaining', 0.5)
+            # Time remaining in episode [0, 1] - compute directly to avoid stale state
+            time_remaining = 1.0 - (self.episode_step / self.max_steps)
 
             # Data-driven time urgency slack
             # slack = spread_bps / sigma_bps, clamped to [0.3, 0.9]

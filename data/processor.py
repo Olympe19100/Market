@@ -8,10 +8,8 @@ from datetime import datetime
 from collections import deque
 from core.config import MarketConfig, ModelConfig
 
-# Configuration du logging pour le suivi des processus de traitement
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Logger for this module (configured by train.py)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 class LOBFeatureProcessor:
     """Stateless processor for LOB (Limit Order Book) feature extraction."""
