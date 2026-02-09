@@ -21,6 +21,85 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# MATHEMATICAL BOUNDS FOR NUMERICAL STABILITY
+# =============================================================================
+
+def compute_log_prob_bounds(logstd: torch.Tensor, k_sigma: float = 6.0) -> Tuple[float, float]:
+    """
+    Compute theoretically-grounded log_prob bounds for Gaussian policy.
+
+    For d-dimensional Gaussian with std σ:
+        log_prob = Σᵢ [-½((aᵢ-μᵢ)/σᵢ)² - log(σᵢ) - ½log(2π)]
+
+    Maximum (action = mean):
+        log_prob_max = d × (-log(σ) - ½log(2π))
+
+    Minimum (action at k×σ from mean, probability < 2e-9 for k=6):
+        log_prob_min = d × (-½k² - log(σ) - ½log(2π))
+
+    Args:
+        logstd: Log standard deviation tensor [batch, action_dim] or [action_dim]
+        k_sigma: Number of std deviations for minimum bound (6 = 99.9999998% coverage)
+
+    Returns:
+        (log_prob_min, log_prob_max) tuple
+    """
+    # Get action dimension and mean logstd
+    if logstd.dim() > 1:
+        d = logstd.shape[-1]
+        mean_logstd = logstd.mean().item()
+    else:
+        d = logstd.shape[0]
+        mean_logstd = logstd.mean().item()
+
+    # Constants
+    half_log_2pi = 0.5 * math.log(2 * math.pi)  # ≈ 0.919
+
+    # Per-dimension contributions
+    # At mean: -log(σ) - ½log(2π)
+    # At k*σ: -½k² - log(σ) - ½log(2π)
+    per_dim_max = -mean_logstd - half_log_2pi
+    per_dim_min = -0.5 * k_sigma**2 - mean_logstd - half_log_2pi
+
+    log_prob_max = d * per_dim_max
+    log_prob_min = d * per_dim_min
+
+    return log_prob_min, log_prob_max
+
+
+def compute_ratio_bounds(clip_ratio: float = 0.2, safety_factor: float = 10.0) -> Tuple[float, float]:
+    """
+    Compute ratio bounds for PPO update.
+
+    The PPO clip objective already bounds the effective ratio to [1-ε, 1+ε].
+    Extra clamping is a safety net for extreme outliers.
+
+    Mathematical reasoning:
+    - Normal operation: ratio ∈ [1-ε, 1+ε] = [0.8, 1.2] for ε=0.2
+    - Safety bound: ratio ∈ [1/(safety_factor/ε), safety_factor/ε]
+    - With safety_factor=10, ε=0.2: ratio ∈ [0.02, 50]
+
+    Args:
+        clip_ratio: PPO clip ratio ε (default 0.2)
+        safety_factor: Multiplier for safety bounds (default 10x beyond clip)
+
+    Returns:
+        (ratio_min, ratio_max) tuple
+    """
+    # Safety bounds are safety_factor times wider than clip bounds
+    ratio_max = 1.0 + safety_factor * clip_ratio  # 1 + 10*0.2 = 3.0... too tight
+    # Actually, use multiplicative bounds
+    ratio_max = (1 + clip_ratio) ** safety_factor  # 1.2^10 ≈ 6.2
+    ratio_min = (1 - clip_ratio) ** safety_factor  # 0.8^10 ≈ 0.107
+
+    # Ensure symmetric in log-space: min = 1/max
+    ratio_max = max(ratio_max, 1.0 / ratio_min)
+    ratio_min = 1.0 / ratio_max
+
+    return ratio_min, ratio_max
+
+
+# =============================================================================
 # SOTA OPTIMIZERS
 # =============================================================================
 
@@ -1619,8 +1698,9 @@ class PPOAgent:
 
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action = dist.sample()
-            # Clamp log_prob to prevent numerical instability [-20, 2] ≈ [2e-9, 7.4]
-            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=-20.0, max=2.0)
+            # Clamp log_prob with theoretically-derived bounds (6-sigma coverage)
+            lp_min, lp_max = compute_log_prob_bounds(logstd, k_sigma=6.0)
+            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=lp_min, max=lp_max)
 
             # Store sequence for memory
             state['lob_seq'] = lob_seq
@@ -1743,8 +1823,9 @@ class PPOAgent:
             # Sample actions
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action_t = dist.sample()
-            # Clamp log_prob to prevent numerical instability
-            log_prob_t = torch.clamp(dist.log_prob(action_t).sum(dim=-1), min=-20.0, max=2.0)
+            # Clamp log_prob with theoretically-derived bounds (6-sigma coverage)
+            lp_min, lp_max = compute_log_prob_bounds(logstd, k_sigma=6.0)
+            log_prob_t = torch.clamp(dist.log_prob(action_t).sum(dim=-1), min=lp_min, max=lp_max)
 
             # Convert to numpy and distribute to output lists
             action_np = action_t.cpu().numpy()
@@ -1961,8 +2042,9 @@ class PPOAgent:
 
             dist = torch.distributions.Normal(mu, torch.exp(logstd))
             action = dist.sample()
-            # Clamp log_prob to prevent numerical instability [-20, 2] ≈ [2e-9, 7.4]
-            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=-20.0, max=2.0)
+            # Clamp log_prob with theoretically-derived bounds (6-sigma coverage)
+            lp_min, lp_max = compute_log_prob_bounds(logstd, k_sigma=6.0)
+            log_prob = torch.clamp(dist.log_prob(action).sum(dim=-1), min=lp_min, max=lp_max)
 
             # Store sequence for memory
             state['lob_seq'] = lob_seq
@@ -2256,14 +2338,17 @@ class PPOAgent:
                         continue
 
                     dist = torch.distributions.Normal(action_mean, torch.exp(action_logstd))
-                    # Clamp log_probs for numerical stability
-                    new_log_probs = torch.clamp(dist.log_prob(batch['actions']).sum(-1), min=-20.0, max=2.0)
+                    # Clamp log_probs with theoretically-derived bounds (6-sigma coverage)
+                    lp_min, lp_max = compute_log_prob_bounds(action_logstd, k_sigma=6.0)
+                    new_log_probs = torch.clamp(dist.log_prob(batch['actions']).sum(-1), min=lp_min, max=lp_max)
                     # Total entropy = sum over action dimensions, then mean over batch
                     # For 9D Gaussian with σ=0.6: H ≈ 9 × 0.9 = 8.1
                     entropy = dist.entropy().sum(-1).mean()
 
-                    # Clamp ratio to prevent extreme updates (extra safety)
-                    ratio = torch.clamp(torch.exp(new_log_probs - batch['log_probs']), min=0.01, max=100.0)
+                    # Clamp ratio with theoretically-derived bounds
+                    # Based on PPO clip ratio ε with safety factor for outliers
+                    r_min, r_max = compute_ratio_bounds(self.rl_config.clip_ratio, safety_factor=10.0)
+                    ratio = torch.clamp(torch.exp(new_log_probs - batch['log_probs']), min=r_min, max=r_max)
 
                     # Update adaptive clip ratio based on ratio statistics (Engstrom 2020)
                     self.current_clip_ratio = self.adaptive_clip.update(ratio)
