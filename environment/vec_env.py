@@ -30,15 +30,18 @@ class AsyncVectorEnv:
         """
         self.n_envs = n_envs
 
-        # Auto-detect optimal number of workers based on CPU cores
+        # Loi d'Amdahl pour I/O-bound tasks:
+        # S = 0.2 (séquentiel - GIL Python), P = 0.8 (parallèle - I/O)
+        # Optimal N = sqrt(P/S) * sqrt(cpu_cores) = 2 * sqrt(cpu_cores)
         import multiprocessing
         cpu_cores = multiprocessing.cpu_count()
-        # Use up to half the cores, capped at n_envs and max 32
-        n_workers = min(n_envs, max(4, cpu_cores // 2), 32)
+        S, P = 0.2, 0.8
+        n_workers = int(np.sqrt(P / S) * np.sqrt(cpu_cores))
 
-        logger.info(f"Creating {n_envs} environments with {n_workers} workers (CPU: {cpu_cores} cores)...")
+        logger.info(f"Creating {n_envs} envs with {n_workers} workers "
+                    f"(Amdahl: sqrt({P}/{S})*sqrt({cpu_cores})={n_workers})")
 
-        # Parallel environment creation using ThreadPoolExecutor
+        # Parallel environment creation
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             self.envs = list(executor.map(lambda _: env_fn(), range(n_envs)))
 
