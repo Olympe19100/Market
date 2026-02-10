@@ -1,15 +1,16 @@
 import os
 import asyncio
 import logging
+import signal
 import yaml
 import argparse
 from pathlib import Path
 from datetime import datetime
 from typing import Dict
 
-from core.config import config
+from core.config import RLConfig, MarketConfig, SimulationConfig, ModelConfig
 from monitoring.logger import setup_logger
-from market_maker import MarketMaker
+from marketmaker import MarketMaker, UnifiedConfig
 
 async def run_market_maker(config_path: str, debug: bool = False):
     """
@@ -42,18 +43,27 @@ async def run_market_maker(config_path: str, debug: bool = False):
             raise ValueError("BINANCE_API_KEY and BINANCE_API_SECRET must be set in environment")
         
         # Créer la configuration
-        config = config.from_dict(config_dict)
-        
+        market_cfg = MarketConfig(**config_dict.get('market', {}))
+        model_cfg = ModelConfig(**config_dict.get('model', {}))
+        rl_cfg = RLConfig(**config_dict.get('rl', {}))
+
+        unified_config = UnifiedConfig.for_real(
+            binance_config=config_dict['binance'],
+            market=market_cfg,
+            model=model_cfg,
+            rl=rl_cfg
+        )
+
         # Créer et démarrer le market maker
-        market_maker = MarketMaker(config)
+        market_maker = MarketMaker(unified_config, env_type="real")
         
         # Gestionnaire de signaux pour arrêt propre
         loop = asyncio.get_event_loop()
         
-        async def shutdown(signal=None):
+        async def shutdown(sig=None):
             """Arrête proprement le market maker."""
-            if signal:
-                logger.info(f"Received exit signal {signal.name}")
+            if sig:
+                logger.info(f"Received exit signal {sig}")
             
             tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             logger.info(f"Cancelling {len(tasks)} outstanding tasks")

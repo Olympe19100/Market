@@ -58,15 +58,16 @@ class MarketFeatureProcessor:
         # No external scaler needed
         self.scaler = None  # Deprecated - kept for compatibility
 
-        self.price_history = []
-        self.orderbook_history = []
         # Max lengths to prevent memory leaks over long training runs
         # Hurst needs max 610 prices (largest window), OFI needs max 233 orderbooks
         self._max_price_history = 1000
         self._max_orderbook_history = 500
 
-        trade_len = market_config.trade_history_maxlen if market_config else 2000
+        # Use deque with maxlen for automatic memory management (no manual trimming needed)
+        self.price_history = deque(maxlen=self._max_price_history)
+        self.orderbook_history = deque(maxlen=self._max_orderbook_history)
 
+        trade_len = market_config.trade_history_maxlen if market_config else 2000
         self.trade_history = deque(maxlen=trade_len)
 
         # SOTA: Use the stateless LOB processor internally
@@ -134,12 +135,7 @@ class MarketFeatureProcessor:
         # Store orderbook with its timestamp
         ts = timestamp if timestamp else datetime.now()
         self.orderbook_history.append({'data': orderbook, 'ts': ts})
-
-        # Trim to prevent unbounded memory growth
-        if len(self.price_history) > self._max_price_history:
-            self.price_history = self.price_history[-self._max_price_history:]
-        if len(self.orderbook_history) > self._max_orderbook_history:
-            self.orderbook_history = self.orderbook_history[-self._max_orderbook_history:]
+        # Note: deque(maxlen=...) auto-trims, no manual trimming needed
 
         logger.debug(f"Mid-price calculated and added to history: {self._mid_price}")
 
