@@ -1139,6 +1139,8 @@ class PopArtLayer(nn.Module):
     def update_stats(self, targets: torch.Tensor):
         """Update running mean/variance and preserve outputs (the 'Art' in PopArt)."""
         with torch.no_grad():
+            # Ensure targets are on the same device as the module's buffers
+            targets = targets.to(self.mu.device)
             batch_mean = targets.mean(dim=0)
             batch_second = (targets ** 2).mean(dim=0)
             self.count += 1
@@ -1644,6 +1646,12 @@ class PPOAgent:
 
         with torch.no_grad():
             # Use per-env history (not the shared one)
+            # Auto-initialize if env_id not found (handles dynamic n_envs changes)
+            if env_id not in self._vec_lob_histories:
+                self._vec_lob_histories[env_id] = deque(maxlen=self.history_size)
+                self._vec_market_histories[env_id] = deque(maxlen=self.history_size)
+                logger.debug(f"Auto-initialized history for env_id={env_id}")
+
             lob_hist = self._vec_lob_histories[env_id]
             mkt_hist = self._vec_market_histories[env_id]
 
@@ -1766,7 +1774,11 @@ class PPOAgent:
             for i in active_indices:
                 state = states[i]
 
-                # Update per-env history
+                # Update per-env history (auto-initialize if needed)
+                if i not in self._vec_lob_histories:
+                    self._vec_lob_histories[i] = deque(maxlen=self.history_size)
+                    self._vec_market_histories[i] = deque(maxlen=self.history_size)
+
                 lob_hist = self._vec_lob_histories[i]
                 mkt_hist = self._vec_market_histories[i]
 
@@ -2148,14 +2160,19 @@ class PPOAgent:
 
         n_aux = getattr(self.model_config, 'n_aux_features', 15)
 
+        # CRITICAL FIX: Update reward_rms with ALL rewards FIRST (batch update)
+        # This ensures all rewards in the trajectory are normalized with the same statistics
+        # (prevents non-stationary normalization where early rewards use different stats than late ones)
+        all_rewards = np.array([t['reward'] for t in trajectory])
+        self.reward_rms.update(all_rewards)
+
         # Pre-process trajectory: normalize rewards and prepare states
         processed = []
         for t in trajectory:
             state = t['state']
             reward = t['reward']
 
-            # Normalize reward
-            self.reward_rms.update(np.array([reward]))
+            # Normalize reward using the SAME (already-updated) statistics for all
             norm_reward = float((reward - self.reward_rms.mean) / np.sqrt(self.reward_rms.var + 1e-8))
 
             stored_state = {

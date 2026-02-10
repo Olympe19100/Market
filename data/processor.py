@@ -372,11 +372,18 @@ class MarketFeatureProcessor:
         # This is a proxy for the actual exponent.
         R = np.max(np.cumsum(returns - np.mean(returns))) - np.min(np.cumsum(returns - np.mean(returns)))
         S = np.std(returns)
-        
-        if S == 0 or R == 0:
+
+        # Guard against division by zero AND very small S (prevents log overflow)
+        # S < 1e-10 means essentially flat market → random walk assumption
+        if S < 1e-10 or R < 1e-10:
             return 0.5
-            
-        hurst = np.log(R / S) / np.log(len(returns))
+
+        # Also guard against extreme R/S ratios that would cause log overflow
+        rs_ratio = R / S
+        if rs_ratio > 1e10 or rs_ratio < 1e-10:
+            return 0.5
+
+        hurst = np.log(rs_ratio) / np.log(len(returns))
         return np.clip(hurst, 0.0, 1.0)
 
     def get_tfi(self, window_seconds: int, current_timestamp: Optional[datetime] = None) -> float:

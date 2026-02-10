@@ -362,7 +362,9 @@ def create_training_config(data_path: str,
                            maker_fee: float = 0.00075,
                            taker_fee: float = 0.00075,
                            n_episodes: int = None,
-                           data_reuse_factor: float = 3.0) -> Dict:
+                           data_reuse_factor: float = 3.0,
+                           episode_duration_minutes: float = 15.0,
+                           step_interval_seconds: float = 0.1) -> Dict:
     """
     Crée une config d'entraînement complète auto-détectée.
 
@@ -378,6 +380,8 @@ def create_training_config(data_path: str,
         taker_fee: Frais taker
         n_episodes: Nombre d'épisodes (None = auto-dérivé des données)
         data_reuse_factor: Combien de fois voir chaque donnée (défaut: 3x)
+        episode_duration_minutes: Durée d'un épisode en minutes (défaut: 15)
+        step_interval_seconds: Intervalle entre steps en secondes (défaut: 0.1)
 
     Returns:
         Config complète pour train.py
@@ -397,8 +401,9 @@ def create_training_config(data_path: str,
     max_spread = max(0.01, observed_spread * 3)  # Au moins 1%, ou 3x le spread observé
     min_spread = max(0.0005, observed_spread * 0.5)  # Au moins 0.05%, ou 0.5x le spread
 
-    # Episode length: 100 seconds at 100ms = 1000 steps
-    max_steps = 1000
+    # Episode length derived from duration and step interval (consistent with RLConfig)
+    # Default: 15 minutes at 100ms intervals = 9000 steps
+    max_steps = int(episode_duration_minutes * 60 / step_interval_seconds)
 
     # === GPU AUTO-DETECTION FOR OPTIMAL n_envs ===
     # More envs = faster data collection = faster training
@@ -557,6 +562,7 @@ def create_training_config(data_path: str,
             'max_position': market['max_position'],
             'min_position': -market['max_position'],
             'max_steps': max_steps,
+            'episode_duration_minutes': episode_duration_minutes,
             'max_bias': max_bias,
             'max_spread': max_spread,
             'min_spread': min_spread,

@@ -567,9 +567,9 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
                         if open_qty > 0 and (abs(running_inv) + open_qty) > 1e-9:
                             avg_price = price
                         elif close_qty < abs(running_inv):
-                            pass
-                        else:
-                            avg_price = price if open_qty > 0 else 0.0
+                            pass  # Keep avg_price for remaining position
+                        # else: position fully closed - keep last avg_price for reference
+                        # (don't reset to 0.0 as it corrupts next trade's PnL calc)
                     else:
                         total_qty = running_inv + qty
                         if total_qty > 1e-9:
@@ -591,9 +591,9 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
                         if open_qty > 0:
                             avg_price = price
                         elif close_qty < running_inv:
-                            pass
-                        else:
-                            avg_price = price if open_qty > 0 else 0.0
+                            pass  # Keep avg_price for remaining position
+                        # else: position fully closed - keep last avg_price for reference
+                        # (don't reset to 0.0 as it corrupts next trade's PnL calc)
                     else:
                         total_qty = abs(running_inv) + qty
                         if total_qty > 1e-9:
@@ -627,8 +627,19 @@ class SimulationMarketMakerEnv(BaseMarketMakerEnv):
             # FEATURE INDEX 0 = microstructure noise / 10 (see processor.py)
             # So we multiply by 10 to get actual volatility in BPS
             # Range after clipping: mf[0] ∈ [-5, 5] → sigma_bps ∈ [0, 50]
-            raw_noise = float(mf[0]) if mf is not None and len(mf) > 0 else 1.0
-            sigma_bps = max(1.0, abs(raw_noise) * 10.0)  # Undo /10 scaling, ensure positive
+            raw_noise = float(mf[0]) if mf is not None and len(mf) > 0 else 0.0
+
+            # During warm-up (noise = 0), estimate volatility from spread
+            # Typical relationship: volatility ≈ spread × sqrt(trades_per_second)
+            # For ~10 trades/sec: volatility ≈ spread × 3
+            market_spread_for_vol = self.current_state.current_spread or (mid_price * 0.005)
+            spread_based_vol_bps = (market_spread_for_vol / mid_price * 10000 * 3) if mid_price > 0 else 15.0
+
+            if abs(raw_noise) < 0.1:  # Near-zero noise (warm-up or flat market)
+                sigma_bps = max(1.0, spread_based_vol_bps)  # Use spread-based estimate
+            else:
+                sigma_bps = max(1.0, abs(raw_noise) * 10.0)  # Undo /10 scaling, ensure positive
+
             sigma = sigma_bps / 10000.0  # Convert BPS to decimal
 
             # Reference scale: typical spread capture per trade
