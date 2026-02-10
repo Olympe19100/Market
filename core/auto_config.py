@@ -17,11 +17,353 @@ import zipfile
 import glob
 import logging
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from decimal import Decimal
 import multiprocessing
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# DATA-DRIVEN ARCHITECTURE & REGULARIZATION
+# =============================================================================
+
+@dataclass
+class DataStatistics:
+    """Statistics computed from data for data-driven configuration."""
+    n_samples: int
+    feature_dim: int
+    effective_rank: int          # PCA rank explaining 95% variance
+    reward_variance: float
+    reward_range: Tuple[float, float]
+    feature_variance: np.ndarray  # Per-feature variance
+    autocorrelation: float       # Reward autocorrelation (temporal structure)
+
+
+def compute_data_statistics(data_path: str, n_samples: int = 2000) -> DataStatistics:
+    """
+    Analyse les données pour extraire des statistiques qui guident l'architecture.
+
+    Cette fonction sample les données et calcule :
+    - Rang effectif des features (complexité intrinsèque)
+    - Variance des rewards (difficulté de prédiction)
+    - Autocorrélation des rewards (structure temporelle)
+    """
+    from training.data_loader import MarketDataLoader
+    from data.processor import LOBFeatureProcessor, MarketFeatureProcessor
+
+    loader = MarketDataLoader(data_path)
+    lob_proc = LOBFeatureProcessor()
+    market_proc = MarketFeatureProcessor()
+
+    features_list = []
+    rewards_proxy = []  # Use price changes as reward proxy
+    prev_mid = None
+
+    for i in range(min(n_samples, len(loader.data))):
+        try:
+            ob = loader.get_next_orderbook()
+            if ob is None:
+                break
+
+            # Extract features
+            lob_feat = lob_proc.process(ob)
+            market_proc.process(ob)
+            market_feat = market_proc.get_features()
+
+            # Combine features
+            combined = np.concatenate([lob_feat, market_feat])
+            features_list.append(combined)
+
+            # Price change as reward proxy
+            bids = ob.get('bids', [[0, 0]])
+            asks = ob.get('asks', [[0, 0]])
+            mid = (float(bids[0][0]) + float(asks[0][0])) / 2
+            if prev_mid is not None and prev_mid > 0:
+                pct_change = (mid - prev_mid) / prev_mid * 10000  # bps
+                rewards_proxy.append(pct_change)
+            prev_mid = mid
+
+        except Exception as e:
+            logger.debug(f"Sample {i} failed: {e}")
+            continue
+
+    if len(features_list) < 100:
+        logger.warning(f"Only {len(features_list)} samples collected, using defaults")
+        return DataStatistics(
+            n_samples=len(features_list),
+            feature_dim=55,
+            effective_rank=30,
+            reward_variance=1.0,
+            reward_range=(-10, 10),
+            feature_variance=np.ones(55),
+            autocorrelation=0.1
+        )
+
+    features = np.array(features_list)
+    rewards = np.array(rewards_proxy) if rewards_proxy else np.zeros(100)
+
+    # Compute effective rank via PCA (dimensions explaining 95% variance)
+    try:
+        # Center features
+        features_centered = features - features.mean(axis=0)
+        # SVD for numerical stability
+        _, s, _ = np.linalg.svd(features_centered, full_matrices=False)
+        explained_var = np.cumsum(s**2) / np.sum(s**2)
+        effective_rank = int(np.searchsorted(explained_var, 0.95) + 1)
+    except Exception:
+        effective_rank = features.shape[1] // 2
+
+    # Reward statistics
+    reward_var = np.var(rewards) if len(rewards) > 1 else 1.0
+    reward_range = (float(np.min(rewards)), float(np.max(rewards))) if len(rewards) > 1 else (-10, 10)
+
+    # Autocorrelation (lag-1) - measures temporal structure
+    if len(rewards) > 10:
+        autocorr = np.corrcoef(rewards[:-1], rewards[1:])[0, 1]
+        autocorr = 0.0 if np.isnan(autocorr) else autocorr
+    else:
+        autocorr = 0.0
+
+    return DataStatistics(
+        n_samples=len(features_list),
+        feature_dim=features.shape[1],
+        effective_rank=effective_rank,
+        reward_variance=float(reward_var),
+        reward_range=reward_range,
+        feature_variance=np.var(features, axis=0),
+        autocorrelation=float(autocorr)
+    )
+
+
+def compute_network_capacity(stats: DataStatistics, action_dim: int = 9) -> Dict:
+    """
+    Calcule la capacité optimale du réseau basée sur les données.
+
+    Théorie:
+    1. Information Bottleneck: hidden ≥ sqrt(input × output)
+    2. Complexité ajustée: × log(1 + reward_variance)
+    3. Rank ratio: capacité proportionnelle au rang effectif
+    4. Anti-overfitting: cap basé sur n_samples
+
+    Formules:
+        base_capacity = sqrt(feature_dim × action_dim)
+        complexity_factor = 1 + log(1 + reward_variance)
+        rank_factor = 1 + effective_rank / feature_dim
+
+        raw_hidden = base_capacity × complexity_factor × rank_factor
+
+        # Anti-overfitting: max params ≈ n_samples / 10
+        max_params = n_samples / 10
+        # 2-layer MLP: params ≈ input × hidden + hidden × output + hidden × hidden
+        max_hidden = sqrt(max_params / 3)
+
+        hidden = min(raw_hidden, max_hidden)
+        hidden = 2^ceil(log2(hidden))  # Round to power of 2
+    """
+    feature_dim = stats.feature_dim
+    n_samples = stats.n_samples
+
+    # Base capacity (information-theoretic minimum)
+    base_capacity = np.sqrt(feature_dim * action_dim)
+
+    # Complexity factor based on reward variance
+    # Higher variance = harder problem = more capacity needed
+    complexity_factor = 1 + np.log1p(stats.reward_variance)
+
+    # Rank factor: if features are low-rank, need less capacity
+    rank_ratio = stats.effective_rank / max(feature_dim, 1)
+    rank_factor = 0.5 + rank_ratio  # Range [0.5, 1.5]
+
+    # Raw capacity calculation
+    raw_actor_hidden = base_capacity * complexity_factor * rank_factor
+
+    # Critic needs more capacity (value prediction harder)
+    raw_critic_hidden = raw_actor_hidden * 1.5
+
+    # Anti-overfitting constraint
+    # Rule of thumb: 10 samples per parameter minimum
+    # 2-layer MLP: params ≈ in×h + h×h + h×out ≈ 3×h² for large h
+    max_params = n_samples / 10
+    max_hidden_from_data = np.sqrt(max_params / 3)
+
+    # Apply constraint
+    actor_hidden = min(raw_actor_hidden, max_hidden_from_data)
+    critic_hidden = min(raw_critic_hidden, max_hidden_from_data * 1.2)
+
+    # Round to nearest power of 2 (GPU efficiency)
+    actor_hidden = int(2 ** np.ceil(np.log2(max(32, actor_hidden))))
+    critic_hidden = int(2 ** np.ceil(np.log2(max(32, critic_hidden))))
+
+    # Cap at reasonable values
+    actor_hidden = min(actor_hidden, 512)
+    critic_hidden = min(critic_hidden, 512)
+
+    return {
+        'actor_hidden_dim': actor_hidden,
+        'critic_hidden_dim': critic_hidden,
+        '_capacity_derivation': {
+            'base_capacity': float(base_capacity),
+            'complexity_factor': float(complexity_factor),
+            'rank_factor': float(rank_factor),
+            'raw_actor': float(raw_actor_hidden),
+            'max_from_data': float(max_hidden_from_data),
+            'formula': 'min(sqrt(feat×act) × log(1+var) × (0.5+rank_ratio), sqrt(n_samples/30))'
+        }
+    }
+
+
+def compute_regularization(stats: DataStatistics, n_epochs: int) -> Dict:
+    """
+    Calcule les hyperparamètres de régularisation basés sur les données.
+
+    Anti-Overfitting Strategy:
+
+    1. Dropout: Inversement proportionnel à n_samples
+       dropout = clip(1 / sqrt(n_samples / 1000), 0.05, 0.3)
+
+    2. Weight Decay: Proportionnel à variance / n_samples
+       wd = clip(reward_variance / n_samples × 100, 0.01, 0.3)
+
+    3. Label Smoothing (entropy bonus): Based on autocorrelation
+       High autocorr = predictable = less smoothing needed
+
+    4. Gradient Clipping: Based on reward range
+       max_grad = clip(1.0 / log(1 + reward_range), 0.5, 2.0)
+    """
+    n_samples = max(stats.n_samples, 100)
+
+    # Dropout: more data = less dropout needed
+    # Base: 0.1 at 10k samples, scales with sqrt
+    dropout = 1.0 / np.sqrt(n_samples / 1000)
+    dropout = float(np.clip(dropout, 0.05, 0.3))
+
+    # Weight decay: prevents memorization
+    # Higher variance + fewer samples = more regularization
+    wd_base = stats.reward_variance / n_samples * 100
+    weight_decay = float(np.clip(wd_base, 0.01, 0.3))
+
+    # Gradient clipping based on reward magnitude
+    reward_range = stats.reward_range[1] - stats.reward_range[0]
+    max_grad_norm = 1.0 / np.log1p(reward_range / 10)
+    max_grad_norm = float(np.clip(max_grad_norm, 0.5, 2.0))
+
+    # Early stopping patience: more data = can train longer
+    # patience = sqrt(n_samples / 100) epochs without improvement
+    early_stop_patience = int(np.sqrt(n_samples / 100))
+    early_stop_patience = max(3, min(early_stop_patience, 20))
+
+    # Entropy coefficient based on autocorrelation
+    # High autocorr = structured problem = less exploration needed
+    entropy_coef_init = 0.01 * (1 - abs(stats.autocorrelation))
+    entropy_coef_init = float(np.clip(entropy_coef_init, 0.001, 0.05))
+
+    return {
+        'dropout': dropout,
+        'weight_decay': weight_decay,
+        'max_grad_norm': max_grad_norm,
+        'early_stop_patience': early_stop_patience,
+        'entropy_coef_init': entropy_coef_init,
+        '_regularization_derivation': {
+            'dropout_formula': f'clip(1/sqrt({n_samples}/1000), 0.05, 0.3) = {dropout:.3f}',
+            'weight_decay_formula': f'clip({stats.reward_variance:.2f}/{n_samples}×100, 0.01, 0.3) = {weight_decay:.3f}',
+            'max_grad_formula': f'clip(1/log(1+{reward_range:.1f}/10), 0.5, 2.0) = {max_grad_norm:.2f}',
+            'patience_formula': f'sqrt({n_samples}/100) = {early_stop_patience}',
+            'entropy_formula': f'0.01 × (1 - |{stats.autocorrelation:.3f}|) = {entropy_coef_init:.4f}'
+        }
+    }
+
+
+def compute_entropy_target(stats: DataStatistics, action_dim: int = 9) -> Dict:
+    """
+    Calcule le target entropy empiriquement plutôt que théoriquement.
+
+    Problème: La formule Gaussienne H = 0.5×log(2πe×σ²) assume distribution non-bornée,
+    mais nos actions sont tanh-bounded [-1, 1].
+
+    Solution Data-Driven:
+    1. Entropy max théorique pour uniform[-1,1]: H_max = log(2) × action_dim ≈ 6.24 pour 9D
+    2. Entropy min (déterministe): H_min ≈ 0
+    3. Target = H_max × coverage_factor
+
+    Coverage schedule:
+    - Early (exploration): 80% of max entropy
+    - Late (exploitation): 50% of max entropy
+
+    La variance des rewards guide le schedule:
+    - High variance = need more exploration = higher coverage
+    """
+    # Max entropy for bounded uniform distribution
+    h_max_per_dim = np.log(2)  # entropy of uniform[-1,1]
+    h_max = h_max_per_dim * action_dim  # ≈ 6.24 for 9D
+
+    # Adjust based on reward variance (harder problem = more exploration)
+    variance_factor = np.clip(1 + np.log1p(stats.reward_variance) / 5, 0.8, 1.2)
+
+    # Coverage bounds
+    coverage_early = 0.80 * variance_factor  # ~80-96% exploration
+    coverage_late = 0.50 * variance_factor   # ~50-60% exploitation
+
+    # Target entropies
+    target_entropy_early = h_max * coverage_early
+    target_entropy_late = h_max * coverage_late
+
+    return {
+        'target_entropy_max': float(h_max),
+        'target_entropy_early': float(target_entropy_early),
+        'target_entropy_late': float(target_entropy_late),
+        'coverage_early': float(coverage_early),
+        'coverage_late': float(coverage_late),
+        '_entropy_derivation': {
+            'h_max_formula': f'log(2) × {action_dim} = {h_max:.3f}',
+            'variance_factor': float(variance_factor),
+            'note': 'Based on bounded uniform distribution, NOT unbounded Gaussian'
+        }
+    }
+
+
+def compute_learning_rate_bounds(stats: DataStatistics, batch_size: int) -> Dict:
+    """
+    Calcule les bornes du learning rate basées sur les données.
+
+    Théorie (Smith 2017, Cyclical Learning Rates):
+    - LR_max ≈ 1 / (loss_curvature × batch_size)
+    - LR_min ≈ LR_max / 10
+
+    Approximation de la courbure via variance:
+    - High reward variance = high curvature = lower LR needed
+
+    Formule:
+        lr_base = 3e-4  # Adam default for RL
+        lr_scale = 1 / sqrt(reward_variance + 1)
+        lr_max = lr_base × lr_scale
+        lr_min = lr_max / 10
+    """
+    lr_base = 3e-4
+
+    # Scale inversely with variance (high variance = unstable = lower LR)
+    variance_scale = 1.0 / np.sqrt(stats.reward_variance + 1)
+
+    # Scale with batch size (larger batch = can use higher LR)
+    batch_scale = np.sqrt(batch_size / 64)  # Normalize to batch=64
+
+    lr_max = lr_base * variance_scale * batch_scale
+    lr_min = lr_max / 10
+
+    # Warmup steps based on data size
+    warmup_steps = int(np.sqrt(stats.n_samples))
+
+    return {
+        'lr_max': float(np.clip(lr_max, 1e-5, 1e-2)),
+        'lr_min': float(np.clip(lr_min, 1e-6, 1e-3)),
+        'warmup_steps': warmup_steps,
+        '_lr_derivation': {
+            'variance_scale': float(variance_scale),
+            'batch_scale': float(batch_scale),
+            'formula': f'3e-4 × {variance_scale:.3f} × {batch_scale:.3f} = {lr_max:.2e}'
+        }
+    }
 
 
 def get_optimal_parallelism() -> Dict:
@@ -396,6 +738,22 @@ def create_training_config(data_path: str,
     if not market:
         raise ValueError(f"Impossible de détecter la config depuis {data_path}")
 
+    # === COMPUTE DATA STATISTICS FOR DATA-DRIVEN CONFIG ===
+    logger.info("Computing data statistics for data-driven configuration...")
+    try:
+        data_stats = compute_data_statistics(data_path, n_samples=2000)
+        logger.info(f"  Samples analyzed: {data_stats.n_samples}")
+        logger.info(f"  Feature dim: {data_stats.feature_dim}, Effective rank: {data_stats.effective_rank}")
+        logger.info(f"  Reward variance: {data_stats.reward_variance:.4f}")
+        logger.info(f"  Autocorrelation: {data_stats.autocorrelation:.4f}")
+    except Exception as e:
+        logger.warning(f"Data statistics computation failed: {e}, using defaults")
+        data_stats = DataStatistics(
+            n_samples=10000, feature_dim=55, effective_rank=30,
+            reward_variance=1.0, reward_range=(-10, 10),
+            feature_variance=np.ones(55), autocorrelation=0.1
+        )
+
     # === ALL DERIVED FROM DATA ===
     observed_spread = market['spread_bps'] / 10000  # Convertir bps en ratio
     max_spread = max(0.01, observed_spread * 3)  # Au moins 1%, ou 3x le spread observé
@@ -545,6 +903,35 @@ def create_training_config(data_path: str,
     clip_ratio = min(0.3, np.sqrt(2 * target_kl))
     clip_ratio = max(0.1, clip_ratio)  # Clamp to [0.1, 0.3]
 
+    # === DATA-DRIVEN NETWORK CAPACITY (Anti-Overfitting) ===
+    network_capacity = compute_network_capacity(data_stats, action_dim=action_dim)
+    actor_hidden_dim = network_capacity['actor_hidden_dim']
+    critic_hidden_dim = network_capacity['critic_hidden_dim']
+    logger.info(f"  Network capacity: Actor={actor_hidden_dim}, Critic={critic_hidden_dim}")
+
+    # === DATA-DRIVEN REGULARIZATION ===
+    regularization = compute_regularization(data_stats, n_epochs=num_epochs)
+    dropout = regularization['dropout']
+    weight_decay = regularization['weight_decay']
+    max_grad_norm = regularization['max_grad_norm']
+    early_stop_patience = regularization['early_stop_patience']
+    entropy_coef_init = regularization['entropy_coef_init']
+    logger.info(f"  Regularization: dropout={dropout:.3f}, weight_decay={weight_decay:.3f}, patience={early_stop_patience}")
+
+    # === DATA-DRIVEN ENTROPY TARGET (Bounded distribution) ===
+    entropy_config = compute_entropy_target(data_stats, action_dim=action_dim)
+    target_entropy_early = entropy_config['target_entropy_early']
+    target_entropy_late = entropy_config['target_entropy_late']
+    logger.info(f"  Entropy targets: early={target_entropy_early:.2f}, late={target_entropy_late:.2f}")
+
+    # === DATA-DRIVEN LEARNING RATE ===
+    lr_config = compute_learning_rate_bounds(data_stats, batch_size=batch_size)
+    # Override learning_rate with data-driven value, but keep the n_envs scaling
+    lr_data_driven = lr_config['lr_max'] / np.sqrt(n_envs / base_n_envs)
+    learning_rate = min(learning_rate, lr_data_driven)  # Use more conservative value
+    warmup_steps = lr_config['warmup_steps']
+    logger.info(f"  Learning rate: {learning_rate:.2e} (data-driven bound: {lr_config['lr_max']:.2e})")
+
     config = {
         'market': {
             'symbol': market['symbol'],
@@ -578,13 +965,20 @@ def create_training_config(data_path: str,
             # This is NOT arbitrary - derived from bias-variance analysis
             'gae_lambda': 0.95,
 
-            # max_grad_norm: Prevents exploding gradients
-            # 1.0 is standard for LayerNorm networks (no BatchNorm)
-            'max_grad_norm': 1.0,
+            # max_grad_norm: DATA-DRIVEN based on reward range
+            'max_grad_norm': max_grad_norm,
+
+            # === ENTROPY (DATA-DRIVEN) ===
+            'target_entropy_early': target_entropy_early,
+            'target_entropy_late': target_entropy_late,
+            'entropy_coef_init': entropy_coef_init,
+
+            # === EARLY STOPPING (ANTI-OVERFITTING) ===
+            'early_stop_patience': early_stop_patience,
 
             # === OPTIMIZER ===
             'optimizer': 'adamw',
-            'weight_decay': 0.1,  # Mamba paper standard
+            'weight_decay': weight_decay,  # DATA-DRIVEN
         },
         'model': {
             'input_shape': (50, 40),
@@ -592,8 +986,11 @@ def create_training_config(data_path: str,
             'embedding_dim': 192,
             'num_heads': 4,
             'num_layers': 3,
-            'dropout': 0.1,
-            'n_features': 40
+            'dropout': dropout,  # DATA-DRIVEN
+            'n_features': 40,
+            # === NETWORK CAPACITY (DATA-DRIVEN, ANTI-OVERFITTING) ===
+            'actor_hidden_dim': actor_hidden_dim,
+            'critic_hidden_dim': critic_hidden_dim,
         },
         'training': {
             'n_episodes': n_episodes,
@@ -621,6 +1018,28 @@ def create_training_config(data_path: str,
             'warmup_formula': f'sqrt({n_episodes}) = {warmup_episodes}',
             'target_kl_formula': f'0.5 * {action_dim} * {delta_per_dim}^2 = {target_kl:.4f}',
             'clip_ratio_formula': f'clamp(sqrt(2 * {target_kl:.4f}), 0.1, 0.3) = {clip_ratio:.3f}',
+        },
+        '_data_driven': {
+            # === DATA STATISTICS ===
+            'n_samples_analyzed': data_stats.n_samples,
+            'feature_dim': data_stats.feature_dim,
+            'effective_rank': data_stats.effective_rank,
+            'reward_variance': data_stats.reward_variance,
+            'autocorrelation': data_stats.autocorrelation,
+
+            # === NETWORK CAPACITY DERIVATION ===
+            **network_capacity.get('_capacity_derivation', {}),
+            'actor_hidden_dim': actor_hidden_dim,
+            'critic_hidden_dim': critic_hidden_dim,
+
+            # === REGULARIZATION DERIVATION ===
+            **regularization.get('_regularization_derivation', {}),
+
+            # === ENTROPY DERIVATION ===
+            **entropy_config.get('_entropy_derivation', {}),
+
+            # === LEARNING RATE DERIVATION ===
+            **lr_config.get('_lr_derivation', {}),
         }
     }
 

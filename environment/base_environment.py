@@ -55,7 +55,10 @@ class Portfolio:
         self._realized_pnl = 0.0
         self._unrealized_pnl = 0.0
         self._total_pnl = 0.0
-        self.trades_df = pd.DataFrame(columns=['timestamp', 'price', 'size', 'side', 'fees'])
+        # Use list for O(1) appends, convert to DataFrame only when needed
+        self._trades_list = []
+        self._trades_df_dirty = True  # Flag to rebuild DataFrame
+        self._trades_df_cache = None
         logger.debug(f"Portfolio initialized with cash={initial_cash}")
 
     @property
@@ -78,10 +81,21 @@ class Portfolio:
     def total_pnl(self) -> float:
         return self._total_pnl
 
+    @property
+    def trades_df(self) -> pd.DataFrame:
+        """Lazy DataFrame construction - only build when accessed."""
+        if self._trades_df_dirty or self._trades_df_cache is None:
+            if self._trades_list:
+                self._trades_df_cache = pd.DataFrame(self._trades_list)
+            else:
+                self._trades_df_cache = pd.DataFrame(columns=['timestamp', 'price', 'size', 'fee'])
+            self._trades_df_dirty = False
+        return self._trades_df_cache
+
     def add_trade(self, timestamp: datetime, price: float, size: float, side: str, fee: float = 0.0):
         """Ajoute un trade de manière incrémentale pour la performance."""
         qty = size if side == 'buy' else -size
-        
+
         # Realized PnL is NOT calculated here (too complex with partial FIFO)
         # We track cash and inventory directly for Sim speed.
         if side == 'buy':
@@ -90,15 +104,15 @@ class Portfolio:
         else:
             self._cash += (price * size - fee)
             self._inventory -= size
-            
-        new_trade = pd.DataFrame({
-            'timestamp': [timestamp],
-            'price': [price],
-            'size': [qty],
-            'fee': [fee]
+
+        # O(1) append to list instead of O(N) pd.concat
+        self._trades_list.append({
+            'timestamp': timestamp,
+            'price': price,
+            'size': qty,
+            'fee': fee
         })
-        self.trades_df = pd.concat([new_trade, self.trades_df], ignore_index=True)
-        # self._update_portfolio() # REMOVED: O(N^2) Bottleneck
+        self._trades_df_dirty = True  # Mark cache as stale
 
     def _update_portfolio(self):
         """Met à jour le portfolio avec les nouveaux trades en utilisant vectorbt."""
@@ -560,7 +574,7 @@ class BaseMarketMakerEnv:
                 price=trade['price'],
                 size=trade['size'],
                 side=trade['side'],
-                fees=trade.get('fees', 0)
+                fee=trade.get('fee', trade.get('fees', 0))  # Support both 'fee' and 'fees' keys
             )
             logger.debug(f"Trade mis à jour: {trade}")
         except Exception as e:

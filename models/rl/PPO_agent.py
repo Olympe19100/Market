@@ -1415,9 +1415,18 @@ class PPOAgent:
         # Actor/Critic heads on top of backbone
         # LOBModel outputs 576-dim (512 LOB + 64 aux when aux enabled)
         backbone_output_dim = 512 + (64 if self.model_config.n_aux_features > 0 else 0)
+
+        # DATA-DRIVEN hidden dimensions (from auto_config.py)
+        # Falls back to 256 if not specified in config
+        actor_hidden = getattr(self.model_config, 'actor_hidden_dim', 256)
+        critic_hidden = getattr(self.model_config, 'critic_hidden_dim', 256)
+        # Use max of actor/critic for shared fusion layer
+        hidden_dim = max(actor_hidden, critic_hidden)
+        logger.info(f"Network capacity: hidden_dim={hidden_dim} (actor={actor_hidden}, critic={critic_hidden})")
+
         self.heads = ActorCriticHead(
             input_dim=backbone_output_dim,
-            hidden_dim=256,
+            hidden_dim=hidden_dim,
             action_dim=9,
             position_dim=11
         ).to(device)
@@ -1514,12 +1523,27 @@ class PPOAgent:
         #
         self.auto_entropy_tuning = getattr(rl_config, 'auto_entropy_tuning', True)
         action_dim = 9
-        coverage = getattr(rl_config, 'entropy_coverage', 0.90)  # 90% action space coverage
-        z_p = 1.645 if coverage == 0.90 else (1.96 if coverage == 0.95 else 1.28)  # Gaussian quantile
-        h_per_dim = 0.5 * np.log(2 * np.pi * np.e) - np.log(z_p)  # = 1.4189 - log(z_p)
-        self.target_entropy = action_dim * h_per_dim
-        logger.info(f"Target entropy (coverage={coverage:.0%}): {self.target_entropy:.3f} "
-                    f"(H/dim={h_per_dim:.3f}, σ_target={1/z_p:.3f})")
+
+        # DATA-DRIVEN ENTROPY TARGET (from auto_config.py)
+        # Uses bounded uniform distribution theory, not unbounded Gaussian
+        # Falls back to old Gaussian-based calculation if not specified
+        if hasattr(rl_config, 'target_entropy_early') and rl_config.target_entropy_early is not None:
+            # Use data-driven entropy targets (bounded distribution)
+            self.target_entropy = rl_config.target_entropy_early  # Start with exploration target
+            self._target_entropy_early = rl_config.target_entropy_early
+            self._target_entropy_late = getattr(rl_config, 'target_entropy_late', rl_config.target_entropy_early * 0.6)
+            logger.info(f"Target entropy (DATA-DRIVEN): early={self._target_entropy_early:.3f}, "
+                        f"late={self._target_entropy_late:.3f} (bounded uniform)")
+        else:
+            # Fallback to Gaussian-based calculation
+            coverage = getattr(rl_config, 'entropy_coverage', 0.90)
+            z_p = 1.645 if coverage == 0.90 else (1.96 if coverage == 0.95 else 1.28)
+            h_per_dim = 0.5 * np.log(2 * np.pi * np.e) - np.log(z_p)
+            self.target_entropy = action_dim * h_per_dim
+            self._target_entropy_early = self.target_entropy
+            self._target_entropy_late = self.target_entropy * 0.6
+            logger.info(f"Target entropy (coverage={coverage:.0%}): {self.target_entropy:.3f} "
+                        f"(H/dim={h_per_dim:.3f}, σ_target={1/z_p:.3f})")
         if self.auto_entropy_tuning:
             # log(alpha) is learnable for numerical stability
             self.log_alpha = nn.Parameter(torch.tensor(getattr(rl_config, 'log_alpha_init', 0.0)))
